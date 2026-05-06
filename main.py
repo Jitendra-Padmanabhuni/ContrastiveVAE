@@ -6,7 +6,8 @@ import numpy as np
 from scipy.stats import spearmanr
 from models.factor_vae import FactorVAE
 from data.qlib_dataset import initialize_qlib, get_qlib_dataloader
-from utils import kl_divergence, negative_log_likelihood
+# Add to your imports
+from utils import kl_divergence, negative_log_likelihood, info_nce_loss
 
 # --- Hyperparameters ---
 SEQ_LEN = 20
@@ -17,7 +18,10 @@ NUM_FACTORS = 8
 GAMMA = 1.0       
 LR = 1e-4
 EPOCHS = 1
-RISK_AVERSION = 0.5 
+RISK_AVERSION = 0.5
+LAMBDA_CON = 0.5       # Weight of the Contrastive Loss
+CONTRASTIVE_DAYS = 16  # Accumulate 16 days before stepping optimizer
+SUBSAMPLE_RATIO = 0.8  # Keep 80% of stocks for each contrastive view 
 MODEL_PATH = "factor_vae_weights.pth" 
 
 # --- Portfolio Backtest Hyperparameters (from Paper) ---
@@ -173,12 +177,16 @@ def train():
     
     optimizer = optim.Adam(model.parameters(), lr=LR)
     
-    
     for epoch in range(EPOCHS):
         model.train()
         epoch_loss = 0.0
+        
+        # Contrastive Accumulators
+        optimizer.zero_grad()
+        z1_batch, z2_batch = [], []
+        vae_loss_accum = 0.0
+        valid_days = 0
 
-        # We call the generator directly! It streams the data efficiently.
         train_loader = get_qlib_dataloader("2010-01-01", "2017-12-31", seq_len=SEQ_LEN)
         
         for date, x_batch, y_batch in train_loader:
@@ -188,20 +196,70 @@ def train():
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
 
-            optimizer.zero_grad()
-            
+            # --- 1. Standard VAE Pass (using ALL stocks) ---
             mu_y, sigma_y, mu_post, sigma_post, mu_prior, sigma_prior = model(x_batch, y_batch)
             
             nll = negative_log_likelihood(y_batch, mu_y, sigma_y)
             kl = kl_divergence(mu_post, sigma_post, mu_prior, sigma_prior)
-            loss = nll + GAMMA * kl
+            vae_loss_accum += (nll + GAMMA * kl)
             
-            loss.backward()
+            # --- 2. Contrastive Pass (using Subsampled Views) ---
+            N_total = x_batch.shape[0]
+            subset_size = int(N_total * SUBSAMPLE_RATIO)
+            
+            # Generate two random permutations of stock indices
+            idx1 = torch.randperm(N_total, device=device)[:subset_size]
+            idx2 = torch.randperm(N_total, device=device)[:subset_size]
+            
+            view1, view2 = x_batch[idx1], x_batch[idx2]
+            
+            # Extract prior factors for both views
+            z1 = model.get_prior_factors(view1) # Shape: (K,)
+            z2 = model.get_prior_factors(view2) # Shape: (K,)
+            
+            z1_batch.append(z1)
+            z2_batch.append(z2)
+            valid_days += 1
+            
+            # --- 3. Compute Multi-Task Loss and Step (Every 16 Days) ---
+            if valid_days == CONTRASTIVE_DAYS:
+                Z1 = torch.stack(z1_batch) # Shape: (16, K)
+                Z2 = torch.stack(z2_batch) # Shape: (16, K)
+                
+                # Calculate InfoNCE across the 16 days
+                con_loss = info_nce_loss(Z1, Z2)
+                
+                # Average VAE loss over the 16 days
+                avg_vae_loss = vae_loss_accum / CONTRASTIVE_DAYS
+                
+                # Joint Objective
+                total_loss = avg_vae_loss + (LAMBDA_CON * con_loss)
+                
+                total_loss.backward()
+                optimizer.step()
+                
+                epoch_loss += total_loss.item()
+                
+                # Reset accumulators for next batch of days
+                optimizer.zero_grad()
+                z1_batch, z2_batch = [], []
+                vae_loss_accum = 0.0
+                valid_days = 0
+
+        # Catch any remaining days at the end of the epoch
+        if valid_days > 1:
+            Z1 = torch.stack(z1_batch)
+            Z2 = torch.stack(z2_batch)
+            con_loss = info_nce_loss(Z1, Z2)
+            avg_vae_loss = vae_loss_accum / valid_days
+            total_loss = avg_vae_loss + (LAMBDA_CON * con_loss)
+            total_loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
+            epoch_loss += total_loss.item()
             
         print(f"Epoch {epoch+1} | Loss: {epoch_loss:.4f}")
-        # FIXED: Instantiate the validation generator right before evaluating
+        
+        # Evaluate out-of-sample
         val_loader = get_qlib_dataloader("2018-01-01", "2019-12-31", seq_len=SEQ_LEN)
         evaluate(model, device, val_loader)
 

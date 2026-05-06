@@ -14,11 +14,16 @@ class FactorVAE(nn.Module):
         self.factor_predictor = FactorPredictor(hidden_size, num_factors)
         self.factor_decoder = FactorDecoder(hidden_size, num_factors)
 
+    def get_contrastive_representation(self, x):
+        """
+        NEW METHOD: Extracts the deterministic mean for contrastive learning, 
+        avoiding the reparameterization noise of the VAE.
+        """
+        e = self.feature_extractor(x)
+        mu_prior, _ = self.factor_predictor(e) # Ignore sigma
+        return mu_prior
+
     def forward(self, x, y=None):
-        """
-        x: (N, T, C)
-        y: (N,) - Only provided during training
-        """
         # 1. Extract latent features
         e = self.feature_extractor(x) # (N, H)
         
@@ -37,8 +42,5 @@ class FactorVAE(nn.Module):
         
         else:
             # --- PREDICTION PHASE ---
-            # Model uses prior factors only; encoder is completely bypassed
-            # z_prior = reparameterize(mu_prior, sigma_prior)
             mu_y, sigma_y = self.factor_decoder(e, mu_prior, sigma_prior)
-            
             return mu_y, sigma_y
