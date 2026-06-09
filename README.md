@@ -155,7 +155,7 @@ The asymmetric risk-return profile — high Sharpe with shallow drawdown — val
 
 ## Quickstart
 
-Cluster setup, environment creation, and Slurm submission are documented in [`SETUP.md`](SETUP.md). Once the environment is built and the Qlib US dataset is downloaded:
+Cluster setup, environment creation, and Slurm submission are documented in [`SETUP.md`]([SETUP.md](https://github.com/Jitendra-Padmanabhuni/ContrastiveVAE/blob/main/SETUP.md)). Once the environment is built and the Qlib US dataset is downloaded:
 
 ```bash
 # Full training
